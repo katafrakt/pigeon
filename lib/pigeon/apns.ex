@@ -157,6 +157,7 @@ defmodule Pigeon.APNS do
   """
 
   defstruct config: nil,
+            ping_timer: nil,
             queue: Pigeon.HTTP.RequestQueue.new(),
             socket: nil
 
@@ -179,8 +180,10 @@ defmodule Pigeon.APNS do
 
     case Configurable.connect(config) do
       {:ok, socket} ->
-        Configurable.schedule_ping(config)
-        {:ok, %{state | socket: socket}}
+        state
+        |> Map.put(:socket, socket)
+        |> schedule_ping()
+        |> then(&{:ok, &1})
 
       {:error, reason} ->
         {:stop, reason}
@@ -189,47 +192,50 @@ defmodule Pigeon.APNS do
 
   @impl true
   def handle_push(notification, state) do
-    %{config: config, queue: queue, socket: socket} = state
+    with {:ok, %{config: config, queue: queue, socket: socket} = state} <-
+           ensure_socket(state),
+         headers = Configurable.push_headers(config, notification, []),
+         payload = Configurable.push_payload(config, notification, []),
+         method = "POST",
+         path = "/3/device/#{notification.device_token}",
+         {:ok, socket, ref} <-
+           Mint.HTTP.request(socket, method, path, headers, payload) do
+      new_q = RequestQueue.add(queue, ref, notification)
 
-    headers = Configurable.push_headers(config, notification, [])
-    payload = Configurable.push_payload(config, notification, [])
-    method = "POST"
-    path = "/3/device/#{notification.device_token}"
+      state =
+        state
+        |> Map.put(:socket, socket)
+        |> Map.put(:queue, new_q)
 
-    {:ok, socket, ref} =
-      Mint.HTTP.request(socket, method, path, headers, payload)
+      {:noreply, state}
+    else
+      {:error, reason} ->
+        {:stop, reason}
 
-    new_q = RequestQueue.add(queue, ref, notification)
-
-    state =
-      state
-      |> Map.put(:socket, socket)
-      |> Map.put(:queue, new_q)
-
-    {:noreply, state}
+      {:error, socket, reason} ->
+        {:stop, reason, %{state | socket: socket}}
+    end
   end
 
   @impl true
-  def handle_info(:ping, %{socket: socket} = state) do
-    {:ok, socket, _ref} = Mint.HTTP2.ping(socket)
-    Configurable.schedule_ping(state.config)
-
-    {:noreply, %{state | socket: socket}}
-  end
-
-  def handle_info({:closed, _}, %{config: config} = state) do
-    case Configurable.connect(config) do
-      {:ok, socket} ->
-        Configurable.schedule_ping(config)
-        {:noreply, %{state | socket: socket}}
-
+  def handle_info(:ping, state) do
+    with {:ok, %{socket: socket} = state} <- ensure_socket(state),
+         {:ok, socket, _ref} <- Mint.HTTP2.ping(socket) do
+      state
+      |> Map.put(:socket, socket)
+      |> schedule_ping()
+      |> then(&{:noreply, &1})
+    else
       {:error, reason} ->
         {:stop, reason}
+
+      {:error, socket, reason} ->
+        {:stop, reason, %{state | socket: socket}}
     end
   end
 
   def handle_info(msg, state) do
-    Pigeon.HTTP.handle_info(msg, state, &handle_response/1)
+    Pigeon.HTTP.handle_info(msg, state, &handle_response/1, &reconnect/1)
   end
 
   @spec handle_response(Request.t()) :: :ok
@@ -256,5 +262,42 @@ defmodule Pigeon.APNS do
       {^key, val} -> val
       nil -> nil
     end
+  end
+
+  defp ensure_socket(%{socket: socket} = state) do
+    if Mint.HTTP.open?(socket) do
+      {:ok, state}
+    else
+      reconnect(state)
+      |> reconnect_result()
+    end
+  end
+
+  defp reconnect(%{config: config} = state) do
+    state = Pigeon.HTTP.timeout_pending_requests(state)
+
+    case Configurable.connect(config) do
+      {:ok, socket} ->
+        state
+        |> Map.put(:socket, socket)
+        |> schedule_ping()
+        |> then(&{:noreply, &1})
+
+      {:error, reason} ->
+        {:stop, reason}
+    end
+  end
+
+  defp reconnect_result({:noreply, state}), do: {:ok, state}
+  defp reconnect_result({:stop, reason}), do: {:error, reason}
+
+  defp schedule_ping(
+         %{config: %{ping_period: ping_period}, ping_timer: timer} = state
+       ) do
+    if timer do
+      Process.cancel_timer(timer)
+    end
+
+    %{state | ping_timer: Process.send_after(self(), :ping, ping_period)}
   end
 end

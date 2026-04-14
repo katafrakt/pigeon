@@ -50,6 +50,11 @@ defmodule Pigeon.HTTP.RequestQueue do
     {done, %{queue | requests: Enum.into(not_done, %{})}}
   end
 
+  @spec drain(t()) :: {[Pigeon.HTTP.Request.t()], t()}
+  def drain(queue) do
+    {Map.values(queue.requests), new()}
+  end
+
   @spec process([Mint.Types.response()] | Mint.Types.response(), t()) :: t()
   def process([], queue), do: queue
 
