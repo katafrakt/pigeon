@@ -196,40 +196,70 @@ defmodule Pigeon.APNS do
     method = "POST"
     path = "/3/device/#{notification.device_token}"
 
-    {:ok, socket, ref} =
-      Mint.HTTP.request(socket, method, path, headers, payload)
+    case Mint.HTTP.request(socket, method, path, headers, payload) do
+      {:ok, socket, ref} ->
+        new_q = RequestQueue.add(queue, ref, notification)
 
-    new_q = RequestQueue.add(queue, ref, notification)
+        state =
+          state
+          |> Map.put(:socket, socket)
+          |> Map.put(:queue, new_q)
 
-    state =
-      state
-      |> Map.put(:socket, socket)
-      |> Map.put(:queue, new_q)
+        {:noreply, state}
 
-    {:noreply, state}
+      {:error, socket, reason} ->
+        Logger.error(
+          "APNS push request failed: #{inspect(reason)}, reconnecting"
+        )
+
+        process_on_response(%{notification | response: :timeout})
+        reconnect(%{state | socket: socket})
+    end
   end
 
   @impl true
   def handle_info(:ping, %{socket: socket} = state) do
-    {:ok, socket, _ref} = Mint.HTTP2.ping(socket)
-    Configurable.schedule_ping(state.config)
+    case Mint.HTTP2.ping(socket) do
+      {:ok, socket, _ref} ->
+        Configurable.schedule_ping(state.config)
+        {:noreply, %{state | socket: socket}}
 
-    {:noreply, %{state | socket: socket}}
+      {:error, socket, reason} ->
+        Logger.error("APNS ping failed: #{inspect(reason)}, reconnecting")
+
+        reconnect(%{state | socket: socket})
+    end
   end
 
-  def handle_info({:closed, _}, %{config: config} = state) do
+  def handle_info({:closed, _}, state) do
+    reconnect(state)
+  end
+
+  def handle_info(msg, state) do
+    case Pigeon.HTTP.handle_info(msg, state, &handle_response/1) do
+      {:noreply, %{socket: socket} = new_state} ->
+        if Mint.HTTP.open?(socket) do
+          {:noreply, new_state}
+        else
+          Logger.warning("APNS socket closed after stream error, reconnecting")
+
+          reconnect(new_state)
+        end
+
+      other ->
+        other
+    end
+  end
+
+  defp reconnect(%{config: config} = state) do
     case Configurable.connect(config) do
       {:ok, socket} ->
         Configurable.schedule_ping(config)
-        {:noreply, %{state | socket: socket}}
+        {:noreply, %{state | socket: socket, queue: RequestQueue.new()}}
 
       {:error, reason} ->
         {:stop, reason}
     end
-  end
-
-  def handle_info(msg, state) do
-    Pigeon.HTTP.handle_info(msg, state, &handle_response/1)
   end
 
   @spec handle_response(Request.t()) :: :ok
