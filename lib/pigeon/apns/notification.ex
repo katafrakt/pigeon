@@ -52,9 +52,10 @@ defmodule Pigeon.APNS.Notification do
   - `:success` - Push was successfully sent.
   - `t:Pigeon.APNS.Notification.error_response/0` - Push attempted but
      server responded with error.
-  - `:timeout` - Internal error. Push did not reach APNS servers.
+  - `:timeout` - Caller timed out while waiting for the push response.
+  - `:disconnected` - Push was dropped when the APNS connection was reset.
   """
-  @type response :: nil | :success | error_response | :timeout
+  @type response :: nil | :success | error_response | :timeout | :disconnected
 
   @type error_response ::
           :bad_collapse_id

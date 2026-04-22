@@ -66,7 +66,7 @@ defmodule Pigeon.HTTP do
     Enum.each(requests, fn request ->
       if request.notification do
         request.notification
-        |> Map.put(:response, :timeout)
+        |> Map.put(:response, :disconnected)
         |> Pigeon.Tasks.process_on_response()
       end
     end)

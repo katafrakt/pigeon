@@ -47,9 +47,10 @@ defmodule Pigeon.ADM.Notification do
   - `:success` - Push was successfully sent
   - `t:error_response/0` - Push attempted but server responded
     with error
-  - `:timeout` - Internal error. Push did not reach ADM servers
+  - `:timeout` - Caller timed out while waiting for the push response
+  - `:disconnected` - Push was dropped when the ADM connection was reset
   """
-  @type response :: nil | :success | error_response | :timeout
+  @type response :: nil | :success | error_response | :timeout | :disconnected
 
   @typedoc ~S"""
   ADM error responses
